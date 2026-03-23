@@ -1,0 +1,23 @@
+[project]
+name = "epistemic-stack"
+version = "0.1.0"
+description = "Three MCP servers for shared belief formation in AI-assisted development"
+requires-python = ">=3.10"
+dependencies = ["fastmcp>=2.0.0"]
+license = {text = "MIT"}
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.4.0"]
+
+[project.scripts]
+scan-drift = "scripts.scan_repo:main"
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+# Ignore compact style choices (deliberate in this codebase)
+ignore = ["E401", "E701", "E702", "E722"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

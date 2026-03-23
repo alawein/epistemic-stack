@@ -1,0 +1,56 @@
+name: Drift Check
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install fastmcp>=2.0.0
+
+      - name: Run drift check on PR changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          python -c "
+          import sys, json, os
+          sys.path.insert(0, '.')
+          from importlib.util import spec_from_file_location, module_from_spec
+
+          spec = spec_from_file_location('drift', 'claude-drift/server.py')
+          mod = module_from_spec(spec)
+          spec.loader.exec_module(mod)
+
+          result = mod.check_drift_for_changes(
+              root='.',
+              base_commit=os.environ['BASE_SHA'],
+              head_commit=os.environ['HEAD_SHA'],
+          )
+
+          print(json.dumps(result, indent=2))
+
+          violations = result.get('violations', [])
+          if violations:
+              print(f'\n::warning::Found {len(violations)} drift violation(s) in this PR')
+              for v in violations:
+                  file = v.get('file', '')
+                  line = v.get('line', 1)
+                  desc = v.get('intent_description', '')
+                  evidence = v.get('evidence_text', '')
+                  print(f'::warning file={file},line={line}::{desc} | {evidence}')
+              sys.exit(1)
+          else:
+              print('No drift violations found.')
+          "
