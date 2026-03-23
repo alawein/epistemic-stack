@@ -27,10 +27,10 @@ python claude-drift/server.py
 python claude-memory-mesh/server.py
 python claude-proof/server.py
 
-# Register as MCP servers in Claude Code (update paths)
-claude mcp add claude-drift -- python /path/to/claude-drift/server.py
-claude mcp add claude-memory-mesh -- python /path/to/claude-memory-mesh/server.py
-claude mcp add claude-proof -- python /path/to/claude-proof/server.py
+# Register as MCP servers in Claude Code (run from repo root)
+claude mcp add claude-drift -- python "$(pwd)/claude-drift/server.py"
+claude mcp add claude-memory-mesh -- python "$(pwd)/claude-memory-mesh/server.py"
+claude mcp add claude-proof -- python "$(pwd)/claude-proof/server.py"
 ```
 
 ```bash
@@ -93,6 +93,7 @@ Each server is a standalone FastMCP application with in-process state:
 - **Intent sources**: CLAUDE.md, ADRs, `.drift-rules.json`, human declarations. Drift server parses natural language constraints via regex (not LLM) into typed rules: `import_boundary`, `layer_enforcement`, `prohibition`, `unstructured`.
 - **Proof chains use git**: `begin_modification` creates a baseline commit, `checkpoint` creates tagged commits, `rollback` does `git reset --hard`.
 - **Proof-to-memory bridge**: `promote_claims` in claude-proof imports the memory-mesh module via `sys.modules` (reuses the already-loaded instance) or loads it fresh via `importlib`. This makes the composition work both in-process (tests, CLI) and when both MCP servers are registered separately.
+- **Co-location requirement**: `promote_claims` falls back to loading `../claude-memory-mesh/server.py` relative to its own file. All three server directories must remain siblings under the same parent.
 
 ### MCP tool inventory
 
