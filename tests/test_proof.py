@@ -6,7 +6,7 @@ from unittest.mock import patch, MagicMock
 from claude_proof_server import (
     begin_modification, checkpoint, verify_step, rollback,
     finalize_proof, quick_verify, list_active_proofs, promote_claims,
-    _proofs, _cp_count,
+    _proofs, _cp_count, _git,
 )
 import claude_memory_mesh_server as mms
 
@@ -311,3 +311,90 @@ class TestPromoteClaims:
             found = query_claims(query="Auth tests pass")
             assert found["count"] == 1
             assert found["claims"][0]["verification_level"] == "tested"
+
+
+# ── _git() helper ─────────────────────────────────────────────────────────
+
+class TestGitHelper:
+    def test_failure_returns_false(self):
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=128, stdout="fatal: error")
+            ok, out = _git(["status"])
+        assert ok is False
+
+    def test_timeout_returns_false(self):
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("git", 30)):
+            ok, out = _git(["status"])
+        assert ok is False
+        assert "TimeoutExpired" in out or "timed out" in out.lower() or "30" in out
+
+
+# ── Edge Cases ─────────────────────────────────────────────────────────────
+
+class TestProofEdgeCases:
+    def test_begin_modification_git_fails(self):
+        _clear()
+        with patch("claude_proof_server._git", return_value=(False, "git error")):
+            result = begin_modification("Test", "Plan")
+        # Proof is still created, but sha reflects the error
+        assert "proof_id" in result
+        assert result["proof_id"] in _proofs
+
+    def test_verify_step_static_analysis(self):
+        _clear()
+        with patch("claude_proof_server._git", return_value=(True, "abc")):
+            r = begin_modification("Test", "Plan")
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="OK", stderr="")
+            result = verify_step(
+                r["proof_id"], "Lint check", "static_analysis",
+                "No errors", test_command="ruff check .",
+            )
+        assert result["passed"] is True
+        # Evidence kind should be STATIC_ANALYSIS
+        proof = _proofs[r["proof_id"]]
+        assert proof.steps[-1].evidence.kind.value == "static_analysis"
+
+    def test_finalize_excludes_rollback_from_promotable(self):
+        _clear()
+        with patch("claude_proof_server._git", return_value=(True, "abc")):
+            r = begin_modification("Test", "Plan")
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="OK", stderr="")
+            verify_step(r["proof_id"], "Check", "test", "OK", test_command="echo ok")
+        # Add a rollback step
+        with patch("claude_proof_server._git", return_value=(True, "abc")):
+            checkpoint(r["proof_id"], "Before rollback")
+            rollback(r["proof_id"])
+        result = finalize_proof(r["proof_id"])
+        # Rollback steps should not appear in promotable claims
+        for claim in result["promotable_claims"]:
+            assert "Rollback" not in claim["statement"]
+
+    def test_quick_verify_exception(self):
+        with patch("subprocess.run", side_effect=OSError("no such command")):
+            result = quick_verify("Bad command", "nonexistent_cmd")
+        assert result["passed"] is False
+
+    def test_promote_multiple_mixed(self, memory_db):
+        with patch.object(mms, "DB_PATH", memory_db):
+            claims = [
+                {"statement": "Good claim", "claim_type": "invariant",
+                 "confidence": 0.85, "evidence_kind": "test_result",
+                 "evidence_description": "passed"},
+                {"statement": "Weak claim", "claim_type": "invariant",
+                 "confidence": 0.3},
+            ]
+            result = promote_claims(claims)
+            assert result["promoted"] == 1
+            assert result["failed"] == 1
+
+    def test_rollback_git_fails(self):
+        _clear()
+        with patch("claude_proof_server._git") as mock_git:
+            mock_git.return_value = (True, "abc")
+            r = begin_modification("Test", "Plan")
+            checkpoint(r["proof_id"], "Good state")
+        with patch("claude_proof_server._git", return_value=(False, "reset failed")):
+            result = rollback(r["proof_id"])
+        assert "error" in result

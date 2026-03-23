@@ -1,10 +1,15 @@
 """Tests for claude-drift server — intent parsing and drift detection."""
 
+import json
+from unittest.mock import patch, MagicMock
+
 from claude_drift_server import (
     _extract_intents_md, _extract_intents_json, _derive_rule,
     _check_import_boundary, _check_prohibition, _check_layer_enforcement,
-    _find_intent_files, _drift_score, _intents,
-    scan_intents, check_drift, will_this_drift, declare_intent,
+    _find_intent_files, _drift_score, _intents, _extract_import,
+    _rel_posix, _source_files,
+    scan_intents, check_drift, check_drift_for_changes, will_this_drift,
+    declare_intent, export_rules,
 )
 from shared.types import ArchitecturalIntent, DriftViolation, Severity
 
@@ -227,3 +232,158 @@ class TestDeclareIntent:
             source_pattern="src/a", forbidden_target="src/b",
         )
         assert result["confirmed"] is True
+
+
+# ── Helper Functions ───────────────────────────────────────────────────────
+
+class TestExtractImport:
+    def test_es_module_from(self):
+        assert _extract_import('import { PaymentSession } from "../payment/session";') == "../payment/session"
+
+    def test_require(self):
+        assert _extract_import('const x = require("prisma")') == "prisma"
+
+    def test_python_from_import(self):
+        assert _extract_import("from auth.models import User") == "auth.models"
+
+    def test_python_import(self):
+        assert _extract_import("import os.path") == "os.path"
+
+    def test_no_match(self):
+        assert _extract_import("const x = 42;") is None
+
+
+class TestRelPosix:
+    def test_forward_slashes(self, tmp_project):
+        fp = tmp_project / "src" / "auth" / "handler.ts"
+        result = _rel_posix(fp, tmp_project)
+        assert result == "src/auth/handler.ts"
+        assert "\\" not in result
+
+    def test_root_file(self, tmp_project):
+        fp = tmp_project / "CLAUDE.md"
+        assert _rel_posix(fp, tmp_project) == "CLAUDE.md"
+
+
+class TestSourceFiles:
+    def test_finds_ts_files(self, tmp_project):
+        files = _source_files(str(tmp_project))
+        names = [f.name for f in files]
+        assert "handler.ts" in names
+        assert "controller.ts" in names
+
+    def test_skips_node_modules(self, tmp_project):
+        nm = tmp_project / "node_modules" / "pkg"
+        nm.mkdir(parents=True)
+        (nm / "index.ts").write_text("export default 1;")
+        files = _source_files(str(tmp_project))
+        assert not any("node_modules" in f.parts for f in files)
+
+    def test_skips_venv(self, tmp_project):
+        venv = tmp_project / ".venv" / "lib"
+        venv.mkdir(parents=True)
+        (venv / "util.py").write_text("x = 1")
+        files = _source_files(str(tmp_project))
+        assert not any(".venv" in f.parts for f in files)
+
+
+# ── check_drift_for_changes ───────────────────────────────────────────────
+
+class TestCheckDriftForChanges:
+    def test_detects_violations_in_changed_files(self, tmp_project):
+        _intents.clear()
+        scan_intents(str(tmp_project))
+        with patch("claude_drift_server.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout="src/auth/handler.ts\n",
+            )
+            result = check_drift_for_changes(str(tmp_project))
+        assert result["files_changed"] == 1
+        assert result["new_violations"] >= 1
+
+    def test_no_changes(self, tmp_project):
+        _intents.clear()
+        with patch("claude_drift_server.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="")
+            result = check_drift_for_changes(str(tmp_project))
+        assert result["new_violations"] == 0
+        assert "No files changed" in result["message"]
+
+    def test_clean_diff(self, tmp_project):
+        _intents.clear()
+        scan_intents(str(tmp_project))
+        with patch("claude_drift_server.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0, stdout="src/payment/session.ts\n",
+            )
+            result = check_drift_for_changes(str(tmp_project))
+        assert result["new_violations"] == 0
+
+
+# ── export_rules ──────────────────────────────────────────────────────────
+
+class TestExportRules:
+    def test_exports_confirmed_rules(self, tmp_path):
+        _intents.clear()
+        declare_intent(
+            "No cross-domain", rule_type="import_boundary",
+            source_pattern="src/a", forbidden_target="src/b",
+        )
+        result = export_rules(str(tmp_path))
+        assert result["exported"] == 1
+        data = json.loads((tmp_path / ".drift-rules.json").read_text())
+        assert len(data["rules"]) == 1
+        assert data["rules"][0]["rule_type"] == "import_boundary"
+
+    def test_skips_unconfirmed(self, tmp_path):
+        _intents.clear()
+        declare_intent("Keep things simple")  # unstructured, not confirmed
+        result = export_rules(str(tmp_path))
+        assert result["exported"] == 0
+
+    def test_custom_output_path(self, tmp_path):
+        _intents.clear()
+        declare_intent(
+            "No X", rule_type="import_boundary",
+            source_pattern="a", forbidden_target="b",
+        )
+        export_rules(str(tmp_path), "custom-rules.json")
+        assert (tmp_path / "custom-rules.json").exists()
+
+
+# ── Edge Cases ────────────────────────────────────────────────────────────
+
+class TestDriftEdgeCases:
+    def test_drift_score_capped_at_one(self):
+        violations = [
+            DriftViolation(file="a.ts", severity=Severity.CRITICAL, confidence=1.0)
+            for _ in range(100)
+        ]
+        score = _drift_score(violations, 1)
+        assert score["drift_score"] <= 1.0
+
+    def test_prohibition_fallback_pattern(self, tmp_project):
+        intent = ArchitecturalIntent(
+            description="No getUsers() in api",
+            rule_type="prohibition",
+            rule_config={"forbidden_action": "getUsers()", "scope": "src/api"},
+        )
+        # controller.ts has getUsers() — should match via escaped pattern
+        violations = _check_prohibition(intent, str(tmp_project))
+        assert len(violations) >= 1
+
+    def test_check_drift_no_intents(self, tmp_path):
+        _intents.clear()
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "app.ts").write_text("const x = 1;")
+        result = check_drift(str(tmp_path))
+        assert "error" in result
+
+    def test_import_boundary_empty_config(self, tmp_project):
+        intent = ArchitecturalIntent(
+            rule_type="import_boundary",
+            rule_config={"source_pattern": "", "forbidden_target": ""},
+        )
+        violations = _check_import_boundary(intent, str(tmp_project))
+        assert violations == []

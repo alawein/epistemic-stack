@@ -79,6 +79,55 @@ class TestDriftViolation:
         assert v.to_dict()["severity"] == "critical"
 
 
+class TestEvidence:
+    def test_to_dict_kind_is_string(self):
+        e = Evidence(kind=EvidenceKind.TEST_RESULT, description="passed")
+        d = e.to_dict()
+        assert d["kind"] == "test_result"
+        assert d["description"] == "passed"
+        assert "created_at" in d
+
+
+class TestScope:
+    def test_to_dict(self):
+        from shared.types import Scope
+        s = Scope(files=["a.ts", "b.ts"], services=["auth"])
+        d = s.to_dict()
+        assert d["files"] == ["a.ts", "b.ts"]
+        assert d["services"] == ["auth"]
+        assert d["commits"] == []
+
+
+class TestProvenance:
+    def test_to_dict(self):
+        from shared.types import Provenance
+        p = Provenance(agent_id="test-agent", model="claude-3")
+        d = p.to_dict()
+        assert d["agent_id"] == "test-agent"
+        assert d["model"] == "claude-3"
+        assert d["session_id"] is None
+
+
+class TestVerificationStep:
+    def test_to_dict_with_evidence(self):
+        ev = Evidence(kind=EvidenceKind.TEST_RESULT, description="pytest passed")
+        s = VerificationStep(1, "check", "test", "ok", "ok", True, evidence=ev)
+        d = s.to_dict()
+        assert d["evidence"]["kind"] == "test_result"
+        assert d["passed"] is True
+
+    def test_to_dict_without_evidence(self):
+        s = VerificationStep(1, "check", "test", "ok", "ok", True)
+        d = s.to_dict()
+        assert d["evidence"] is None
+
+
+class TestClaimIsActiveContested:
+    def test_contested_is_not_active(self):
+        c = Claim(status=ClaimStatus.CONTESTED)
+        assert not c.is_active()
+
+
 class TestArchitecturalIntent:
     def test_to_dict_source(self):
         i = ArchitecturalIntent(description="no X", source=IntentSource.ADR)

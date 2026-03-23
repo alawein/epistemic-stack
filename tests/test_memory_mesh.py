@@ -7,8 +7,27 @@ import claude_memory_mesh_server as mms
 from claude_memory_mesh_server import (
     store_claim, before_modifying, record_decision, record_failure,
     query_claims, invalidate_for_file, add_relationship, run_decay,
-    memory_stats, _db,
+    memory_stats, _db, _meets_threshold,
 )
+
+
+class TestMeetsThreshold:
+    def test_invariant_needs_evidence(self):
+        assert _meets_threshold("invariant", 0.8, has_evidence=False, evidence_only_llm=False) is False
+
+    def test_observation_low_bar(self):
+        assert _meets_threshold("observation", 0.3, has_evidence=False, evidence_only_llm=False) is True
+
+    def test_failure_needs_evidence(self):
+        assert _meets_threshold("failure", 0.5, has_evidence=False, evidence_only_llm=False) is False
+
+    def test_unknown_type_uses_default(self):
+        assert _meets_threshold("custom_type", 0.5, has_evidence=False, evidence_only_llm=False) is True
+
+    def test_llm_penalty_raises_bar(self):
+        # constraint threshold is 0.6, +0.2 for LLM-only = 0.8 required
+        assert _meets_threshold("constraint", 0.7, has_evidence=True, evidence_only_llm=True) is False
+        assert _meets_threshold("constraint", 0.8, has_evidence=True, evidence_only_llm=True) is True
 
 
 class TestStoreClaim:
@@ -220,3 +239,124 @@ class TestMemoryStats:
             assert "by_status" in result
             assert "by_type" in result
             assert "recent" in result
+
+
+# ── store_claim edge cases ────────────────────────────────────────────────
+
+class TestStoreClaimEdgeCases:
+    def test_verification_level_asserted(self, memory_db):
+        with patch.object(mms, "DB_PATH", memory_db):
+            store_claim("Human checked", claim_type="decision", confidence=0.6,
+                        evidence_kind="human_assertion", evidence_description="I verified")
+            result = query_claims(query="Human checked")
+            assert result["claims"][0]["verification_level"] == "asserted"
+
+    def test_verification_level_unsupported(self, memory_db):
+        with patch.object(mms, "DB_PATH", memory_db):
+            store_claim("No evidence", claim_type="decision", confidence=0.6)
+            result = query_claims(query="No evidence")
+            assert result["claims"][0]["verification_level"] == "unsupported"
+
+    def test_invalid_evidence_kind_defaults_to_llm(self, memory_db):
+        with patch.object(mms, "DB_PATH", memory_db):
+            # "made_up" is not a valid EvidenceKind, should default to llm_reasoning
+            result = store_claim("Guess", claim_type="observation", confidence=0.5,
+                                 evidence_kind="made_up", evidence_description="idk")
+            assert result["stored"] is True
+
+
+# ── run_decay edge cases ─────────────────────────────────────────────────
+
+class TestRunDecayEdgeCases:
+    def test_decisions_never_expire(self, memory_db):
+        with patch.object(mms, "DB_PATH", memory_db):
+            from datetime import datetime, timezone, timedelta
+            from uuid import uuid4
+            old_ts = (datetime.now(timezone.utc) - timedelta(days=365)).isoformat()
+            conn = _db(memory_db)
+            conn.execute(
+                "INSERT INTO claims (id,statement,claim_type,confidence,status,observed_at) "
+                "VALUES (?,?,'decision',0.9,'verified',?)",
+                (str(uuid4()), "Old decision", old_ts),
+            )
+            conn.commit(); conn.close()
+            result = run_decay()
+            assert result["expired"] == 0
+
+    def test_failures_expire_at_60_days(self, memory_db):
+        with patch.object(mms, "DB_PATH", memory_db):
+            from datetime import datetime, timezone, timedelta
+            from uuid import uuid4
+            old_ts = (datetime.now(timezone.utc) - timedelta(days=61)).isoformat()
+            conn = _db(memory_db)
+            conn.execute(
+                "INSERT INTO claims (id,statement,claim_type,confidence,status,observed_at) "
+                "VALUES (?,?,'failure',0.8,'verified',?)",
+                (str(uuid4()), "Old failure", old_ts),
+            )
+            conn.commit(); conn.close()
+            result = run_decay()
+            assert result["expired"] >= 1
+
+    def test_invariants_expire_at_90_days(self, memory_db):
+        with patch.object(mms, "DB_PATH", memory_db):
+            from datetime import datetime, timezone, timedelta
+            from uuid import uuid4
+            old_ts = (datetime.now(timezone.utc) - timedelta(days=91)).isoformat()
+            conn = _db(memory_db)
+            conn.execute(
+                "INSERT INTO claims (id,statement,claim_type,confidence,status,observed_at,evidence) "
+                "VALUES (?,?,'invariant',0.8,'verified',?,'[]')",
+                (str(uuid4()), "Old invariant", old_ts),
+            )
+            conn.commit(); conn.close()
+            result = run_decay()
+            assert result["expired"] >= 1
+
+    def test_decay_project_root_filter(self, memory_db):
+        with patch.object(mms, "DB_PATH", memory_db):
+            from datetime import datetime, timezone, timedelta
+            from uuid import uuid4
+            old_ts = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+            conn = _db(memory_db)
+            conn.execute(
+                "INSERT INTO claims (id,statement,claim_type,confidence,status,observed_at,project_root) "
+                "VALUES (?,?,'observation',0.5,'verified',?,?)",
+                (str(uuid4()), "Proj A obs", old_ts, "/proj-a"),
+            )
+            conn.execute(
+                "INSERT INTO claims (id,statement,claim_type,confidence,status,observed_at,project_root) "
+                "VALUES (?,?,'observation',0.5,'verified',?,?)",
+                (str(uuid4()), "Proj B obs", old_ts, "/proj-b"),
+            )
+            conn.commit(); conn.close()
+            result = run_decay(project_root="/proj-a")
+            assert result["expired"] == 1  # only proj-a
+
+
+# ── Other edge cases ─────────────────────────────────────────────────────
+
+class TestMemoryMeshEdgeCases:
+    def test_before_modifying_empty(self, memory_db):
+        with patch.object(mms, "DB_PATH", memory_db):
+            result = before_modifying("nonexistent/file.ts")
+            assert result["total"] == 0
+            assert result["constraints"] == []
+            assert result["past_failures"] == []
+
+    def test_query_claims_with_limit(self, memory_db):
+        with patch.object(mms, "DB_PATH", memory_db):
+            for i in range(5):
+                store_claim(f"Claim {i}", claim_type="decision", confidence=0.6)
+            result = query_claims(limit=2)
+            assert result["count"] == 2
+
+    def test_query_claims_project_root_filter(self, memory_db):
+        with patch.object(mms, "DB_PATH", memory_db):
+            store_claim("In proj A", claim_type="decision", confidence=0.6,
+                        project_root="/proj-a")
+            store_claim("In proj B", claim_type="decision", confidence=0.6,
+                        project_root="/proj-b")
+            result = query_claims(project_root="/proj-a")
+            assert result["count"] == 1
+            assert "proj A" in result["claims"][0]["statement"]
