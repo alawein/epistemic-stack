@@ -50,6 +50,7 @@ python scripts/scan_repo.py . --json                          # JSON output
 ```
 
 Python >= 3.10 required. Single runtime dependency: `fastmcp>=2.0.0`.
+On Windows with multiple Python versions, use `py -3.12 -m venv .venv` (3.14 has compilation issues with C extensions).
 
 ### Environment variables
 
@@ -92,6 +93,7 @@ Each server is a standalone FastMCP application with in-process state:
 - **Cross-platform paths**: `_rel_posix()` normalizes file paths to forward slashes so analyzers work on Windows.
 - **Intent sources**: CLAUDE.md, ADRs, `.drift-rules.json`, human declarations. Drift server parses natural language constraints via regex (not LLM) into typed rules: `import_boundary`, `layer_enforcement`, `prohibition`, `unstructured`.
 - **Proof chains use git**: `begin_modification` creates a baseline commit, `checkpoint` creates tagged commits, `rollback` does `git reset --hard`.
+- **Git dependency**: claude-proof requires `git` on PATH. The `_git()` helper silently returns `(False, error)` on failure -- proof chains will appear to work but checkpoints won't persist.
 - **Proof-to-memory bridge**: `promote_claims` in claude-proof imports the memory-mesh module via `sys.modules` (reuses the already-loaded instance) or loads it fresh via `importlib`. This makes the composition work both in-process (tests, CLI) and when both MCP servers are registered separately.
 - **Co-location requirement**: `promote_claims` falls back to loading `../claude-memory-mesh/server.py` relative to its own file. All three server directories must remain siblings under the same parent.
 
