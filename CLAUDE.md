@@ -35,7 +35,7 @@ claude mcp add claude-proof -- python "$(pwd)/claude-proof/server.py"
 
 ```bash
 # Tests and linting
-python -m pytest                                              # all 86 tests
+python -m pytest                                              # all 149 tests
 python -m pytest tests/test_drift.py                          # one file
 python -m pytest tests/test_drift.py::TestImportBoundary -v   # one class
 ruff check .
@@ -125,3 +125,5 @@ Each server is a standalone FastMCP application with in-process state:
 - **Hyphenated dirs**: `conftest.py` uses `importlib.util` to load `claude-drift/server.py` as `claude_drift_server` (and likewise for the other two). Import from these names in tests.
 - **DB isolation**: Patch `mms.DB_PATH` via `patch.object(mms, "DB_PATH", memory_db)`, not `os.environ`. The `_db()` default parameter was captured at import time before `patch.dict` could reach it; the function now reads the module-level `DB_PATH` at call time.
 - **Drift state**: `_intents` is a module-level dict. Call `_intents.clear()` between tests that use `scan_intents` or `declare_intent` to avoid cross-test leakage.
+- **Path assertions in tests**: Use `"x" in path.parts` (exact component match), not `"x" in str(path)`. Pytest temp dirs include test names (e.g., `test_skips_node_modules0`), causing substring false positives.
+- **scan_repo.py tests**: Must `sys.path.insert(0, ROOT / "scripts")` before importing, then `# noqa: E402` on the import line.
