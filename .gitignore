@@ -9,3 +9,5 @@ venv/
 .pytest_cache/
 .ruff_cache/
 *.proof.json
+# Ops reports (generated locally or in CI artifacts)
+reports/sync-report.*.json
