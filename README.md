@@ -1,3 +1,10 @@
+---
+type: canonical
+source: none
+sync: none
+sla: none
+---
+
 # Epistemic Stack
 
 Three MCP servers that give AI coding agents **justified, revisable beliefs** about your codebase.
