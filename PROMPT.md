@@ -1,3 +1,10 @@
+---
+type: canonical
+source: none
+sync: none
+sla: none
+---
+
 # Epistemic Stack — Master Prompt
 
 ## What This Is
